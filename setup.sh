@@ -11,13 +11,11 @@ fi
 
 echo "Region to deploy the solution : $AWS_REGION"
 
-printf "Checking the region to bootstrap the environement..."
+printf "Bootstrapping the environment to run CDK app..."
 ACC_ID=`echo \`aws sts get-caller-identity --query "Account" --output text\``
-cdk bootstrap "$ACC_ID/$AWS_REGION"
+cdk bootstrap "aws://$ACC_ID/$AWS_REGION"
 
-# Clearn install of the CKD project resources
-printf "\nClearning the local workshopace to build the solution..."
-
+printf "\nCleaning the local workspace and building the solution..."
 rm -rf cdk.out/
 rm -rf node_modules/
 rm package-lock.json
