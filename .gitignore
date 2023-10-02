@@ -1,0 +1,9 @@
+node_modules
+.cdk.staging
+cdk.out
+.DS_Store
+.parcel-cache
+.idea/*
+test-commands.txt
+package-lock.json
+
