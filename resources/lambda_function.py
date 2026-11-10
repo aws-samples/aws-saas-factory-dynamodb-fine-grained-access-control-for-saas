@@ -1,5 +1,6 @@
 import json
 import random
+import re
 import boto3
 import os
 import traceback
@@ -16,6 +17,10 @@ get_all_items_response = []
 
 SUFFIX_START=1
 SUFFIX_END=10
+
+# Allowlist for tenant identifiers. Deliberately excludes '*' and '?' (IAM StringLike
+# wildcards), '/' (which '*' matches), and quotes. See _get_policy() for why this matters.
+_TENANT_ID_PATTERN = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
 
 class OpStatus(Enum):
     SUCCESSFUL = 'Successful'
@@ -175,6 +180,24 @@ def _get_scoped_ddb_table_by_tenant(tenant_id):
 
 # Returns the IAM policy with Tenant Context
 def _get_policy(tenant_id):
+    # The tenant id below is substituted into the policy AFTER json.dumps(), so it is
+    # inserted into serialized JSON text with no escaping of any kind. It must therefore be
+    # validated against a strict allowlist before it is used, for two separate reasons:
+    #
+    #   1. IAM treats '*' as a wildcard in StringLike, and it matches '-' and '/'. A tenant
+    #      id of '*' turns the LeadingKeys condition "{TENANTID}-*" into "*-*", which
+    #      matches every tenant's partition key and hands the caller the whole table.
+    #   2. Because the replacement happens on the dumped string rather than on the dict, a
+    #      tenant id containing a double quote can terminate the JSON string literal early
+    #      and inject further policy elements outright.
+    #
+    # This function is the last point at which the value can be checked before it becomes an
+    # STS session policy, so the check belongs here rather than only at the request edge.
+    if not isinstance(tenant_id, str) or not _TENANT_ID_PATTERN.match(tenant_id):
+        raise ValueError(
+            "Invalid tenant_id: expected 1-64 characters of [A-Za-z0-9_-] only"
+        )
+
     policy_template = {
         "Version": "2012-10-17",
         "Statement": [
