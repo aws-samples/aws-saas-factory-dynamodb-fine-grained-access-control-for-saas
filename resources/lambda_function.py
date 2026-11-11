@@ -85,9 +85,17 @@ def _get_all_items_by_tenantId(tenant_id):
     threads = []
     get_all_items_response.clear()
 
+    # Assume the tenant role ONCE and share the resulting credentials with the worker threads,
+    # rather than once per shard. This path previously queried with the Lambda's own execution
+    # role, which holds no tenant condition, so it bypassed the scoping mechanism the rest of
+    # this sample demonstrates. Each thread still builds its own client from these credentials:
+    # botocore clients are safe to use concurrently, but sharing one across threads is avoided
+    # here to keep the original threading behaviour unchanged.
+    credentials = _get_scoped_credentials(tenant_id)
+
     for suffix in range(SUFFIX_START, SUFFIX_END + 1):
         partition_id = tenant_id+'-'+str(suffix)
-        thread = threading.Thread(target=get_tenant_data, args=[partition_id])
+        thread = threading.Thread(target=get_tenant_data, args=[partition_id, credentials])
         threads.append(thread)
 
     # Start threads
@@ -99,9 +107,21 @@ def _get_all_items_by_tenantId(tenant_id):
 
     return get_all_items_response
 
-# A thread target. Queries all items by partition_id and assign them in get_all_items_response
-def get_tenant_data(partition_id):
-    ddb_client = boto3.client('dynamodb')
+# A thread target. Queries all items by partition_id and assign them in get_all_items_response.
+#
+# The credentials are the tenant-scoped ones from _get_scoped_credentials(): the session policy
+# carries a dynamodb:LeadingKeys condition, so a query for a partition belonging to another
+# tenant is refused by IAM rather than relying on this function to construct the key correctly.
+# This previously used boto3.client('dynamodb') with no arguments, which picked up the Lambda's
+# own execution role -- an unconditioned, table-wide dynamodb:Query grant.
+def get_tenant_data(partition_id, credentials):
+    ddb_client = boto3.client(
+        'dynamodb',
+        region_name=AWS_REGION_NAME,
+        aws_access_key_id=credentials['AccessKeyId'],
+        aws_secret_access_key=credentials['SecretAccessKey'],
+        aws_session_token=credentials['SessionToken'],
+    )
     response = ddb_client.query(
         TableName=DYNAMO_TABLE_NAME,
         ExpressionAttributeValues={
@@ -152,7 +172,10 @@ def _put_item(table, shard_id, product_id):
 
 
 # Returns the scoped DDB table connection by given  tenantID
-def _get_scoped_ddb_table_by_tenant(tenant_id):
+# Assumes the tenant role with a session policy scoped to this tenant's shards, and returns the
+# short-lived credentials. Split out of _get_scoped_ddb_table_by_tenant() so that the threaded
+# query path can obtain the same tenant-scoped credentials without building a resource object.
+def _get_scoped_credentials(tenant_id):
     # Step 01 : Creates the IAM policy document that defines operations that can be performed targeting
     # a tenant specific dataset in the DynamoDB table
     sts_client = boto3.client("sts", region_name=AWS_REGION_NAME)
@@ -162,7 +185,11 @@ def _get_scoped_ddb_table_by_tenant(tenant_id):
         Policy = _get_policy(tenant_id),
     )
     # Step 02 : Extracts the short-living credentials
-    credentials = assumed_role["Credentials"]
+    return assumed_role["Credentials"]
+
+
+def _get_scoped_ddb_table_by_tenant(tenant_id):
+    credentials = _get_scoped_credentials(tenant_id)
 
     # Step 03 : Creates a scoped DB session that has the access to the dataset belong to given tenant ID
     session = boto3.Session(
@@ -205,7 +232,13 @@ def _get_policy(tenant_id):
                 "Effect": "Allow",
                 "Action": [
                     "dynamodb:GetItem",
-                    "dynamodb:PutItem"
+                    "dynamodb:PutItem",
+                    # Required by get_tenant_data(), which previously ran under the Lambda's own
+                    # execution role and so was never covered by the LeadingKeys condition
+                    # below. Adding it here brings that path inside the same tenant scoping as
+                    # GetItem and PutItem. The tenant role's own policy already permits Query,
+                    # so this widens only the session policy, not the role.
+                    "dynamodb:Query"
                 ],
                 "Resource": [
                     DYNAMO_TABLE_ARN
