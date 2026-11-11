@@ -29,14 +29,23 @@ export class DynamodbAccessControlSaasStack extends Stack {
             ]
         });
 
-        const ddbQueryPermissionPolicy = new PolicyStatement({
-            effect: Effect.ALLOW,
-            resources: [table.tableArn],
-            actions: [
-                "dynamodb:Query"
-            ]
-        });
-        lambdaServiceRole.addToPolicy(ddbQueryPermissionPolicy);
+        // The Lambda execution role is deliberately NOT granted dynamodb:Query, or any other
+        // data action on the table.
+        //
+        // It previously held an unconditioned, table-wide dynamodb:Query, and get_tenant_data()
+        // in resources/lambda_function.py used it by calling boto3.client('dynamodb') with no
+        // credentials. So the "list all items for a tenant" path ran outside the tenant-scoping
+        // mechanism this sample exists to demonstrate, and IAM applied no tenant condition to
+        // it at all.
+        //
+        // That path now assumes DDBFGACTenantAssumeRole like every other data path, under a
+        // session policy carrying a dynamodb:LeadingKeys condition. The execution role needs
+        // only sts:AssumeRole on that role -- which it has by being its trusted principal --
+        // plus the basic execution policy above for logging.
+        //
+        // Do not add data actions back here. Granting them to the execution role gives the
+        // function a route to the table that no tenant condition applies to, which removes the
+        // isolation regardless of what the session policy says.
 
         const tenantAssumeRole = new iam.Role(this, 'DDBFGACTenantAssumeRole', {
             assumedBy: new iam.ArnPrincipal(lambdaServiceRole.roleArn)
